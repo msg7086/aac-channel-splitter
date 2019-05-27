@@ -40,11 +40,13 @@ void split_aac(const char * aac_filename) {
     while(!input.eof()) {
         input.read((char*) header, 7);
         if(header[0] != 0xFF || header[1] & 0xF0 != 0xF0) {
-            printf("%d %d --\n", header[0], header[1]);
             printf("Data is corrupted at %ld\n", input.tellg() - beginning);
+            printf("Sync word is %X%X, unable to sync.\n", header[0], header[1]);
             return;
         }
         input.read(buffer, ADTS_length(header) - 7);
+        if(input.eof())
+            break;
         if(ADTS_channel(header) != last_channel) {
             // Channel configuration has changed, writing to new destination
             if(output.is_open())
