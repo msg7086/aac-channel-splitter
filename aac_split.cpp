@@ -18,6 +18,27 @@ void show_progress(size_t progress) {
     printf("%7d/%d MB %.2lf%%     \r", progress >> 20, total >> 20, progress * 100.0 / total);
 }
 
+void sync_signal(ifstream& input) {
+    unsigned char buffer[1048576] = {0};
+    unsigned char* header;
+    input.read((char*) buffer, sizeof(buffer));
+    for(header = buffer; header < buffer + sizeof(buffer)-(1<<14); header++) {
+        // Check current syncword
+        if(header[0] != 0xFF || (header[1] & 0xF6) != 0xF0)
+            continue;
+        int length = ADTS_length(header);
+        // Check next syncword by length
+        if(header[length] != 0xFF || (header[length+1] & 0xF6) != 0xF0)
+            continue;
+        if(header > buffer)
+            printf("Syncing to %d bytes\n", header - buffer);
+        input.seekg(header - buffer, ios::beg);
+        return;
+    }
+    puts("Unable to sync in first megabytes, halt.");
+    exit(-1);
+}
+
 void split_aac(const char * aac_filename) {
     unsigned int file_index = 0;
     unsigned int block_index = 0;
@@ -37,9 +58,10 @@ void split_aac(const char * aac_filename) {
     input.seekg(0, ios::end);
     total = input.tellg() - beginning;
     input.seekg(0, ios::beg);
+    sync_signal(input);
     while(!input.eof()) {
         input.read((char*) header, 7);
-        if(header[0] != 0xFF || header[1] & 0xF0 != 0xF0) {
+        if(header[0] != 0xFF || (header[1] & 0xF0) != 0xF0) {
             printf("Data is corrupted at %ld\n", input.tellg() - beginning);
             printf("Sync word is %X%X, unable to sync.\n", header[0], header[1]);
             return;
