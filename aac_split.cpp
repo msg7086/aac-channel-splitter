@@ -8,6 +8,7 @@ using namespace std;
 
 #define ADTS_channel(header) (((header[2] & 0x1) << 2) | ((header[3] & 0xC0) >> 6))
 #define ADTS_length(header) (((header[3] & 0x3) << 11) | (header[4] << 3) | ((header[5] & 0xE0) >> 5))
+#define BUFFER_LEN (2<<23)
 
 char* name_prefix;
 char out_filename[10240] = {0};
@@ -51,7 +52,10 @@ void split_aac(const char * aac_filename) {
     ifstream input(aac_filename, ios::in | ios::binary);
     ofstream output;
     unsigned char header[7];
-    char buffer[1<<13];
+    char* buffer = new char[BUFFER_LEN];
+    int buffer_valid_length;
+    int pending_check_begin;
+    size_t stream_pos;
     int i = 0;
     // Get total
     auto beginning = input.tellg();
@@ -59,34 +63,63 @@ void split_aac(const char * aac_filename) {
     total = input.tellg() - beginning;
     input.seekg(0, ios::beg);
     sync_signal(input);
-    while(!input.eof()) {
-        input.read((char*) header, 7);
-        if(header[0] != 0xFF || (header[1] & 0xF0) != 0xF0) {
-            printf("Data is corrupted at %ld\n", input.tellg() - beginning);
-            printf("Sync word is %X%X, unable to sync.\n", header[0], header[1]);
-            return;
+    stream_pos = input.tellg() - beginning;
+    while(!input.eof() && stream_pos < total) {
+        reread_data:
+        stream_pos = input.tellg() - beginning;
+        buffer_valid_length = BUFFER_LEN;
+        if(stream_pos + buffer_valid_length > total)
+            buffer_valid_length = total - stream_pos;
+
+        input.read(buffer, buffer_valid_length);
+        input.peek();
+        pending_check_begin = 0;
+
+        while(true) {
+            unsigned char* header = (unsigned char*)buffer + pending_check_begin;
+            if(pending_check_begin + 7 > buffer_valid_length)
+                break;
+            int adts_len = ADTS_length(header);
+            if(pending_check_begin + adts_len > buffer_valid_length)
+                break;
+
+            if(header[0] != 0xFF || (header[1] & 0xF0) != 0xF0) {
+                printf("Data is corrupted at %ld+%d\n", stream_pos, pending_check_begin);
+                printf("Sync word is %X%X, unable to sync.\n", header[0], header[1]);
+                return;
+            }
+
+            if(ADTS_channel(header) != last_channel) {
+                // Channel configuration has changed, writing to new destination
+                input.seekg(pending_check_begin - buffer_valid_length, ios_base::cur);
+
+                if(output.is_open()) {
+                    output.write(buffer, pending_check_begin);
+                    output.close();
+                }
+                last_channel = ADTS_channel(header);
+                sprintf(out_filename, "%s_%d_%dch.aac", name_prefix, ++file_index, ADTS_channel(header));
+                printf("Saving to %s ...                    \n", out_filename);
+                output.open(out_filename, ios::out | ios::binary | ios::trunc);
+                goto reread_data;
+            }
+            pending_check_begin += adts_len;
         }
-        input.read(buffer, ADTS_length(header) - 7);
+
+        if(output.is_open())
+            output.write(buffer, pending_check_begin);
         if(input.eof())
             break;
-        if(ADTS_channel(header) != last_channel) {
-            // Channel configuration has changed, writing to new destination
-            if(output.is_open())
-                output.close();
-            last_channel = ADTS_channel(header);
-            sprintf(out_filename, "%s_%d_%dch.aac", name_prefix, ++file_index, ADTS_channel(header));
-            printf("Saving to %s ...                    \n", out_filename);
-            output.open(out_filename, ios::out | ios::binary | ios::trunc);
-        }
-        output.write((char*) header, 7);
-        output.write(buffer, ADTS_length(header) - 7);
-        if((block_index & 0x1FFF) == 0)
+        input.seekg(pending_check_begin - buffer_valid_length, ios_base::cur);
+
+        // if((block_index & 0x1FFF) == 0)
             show_progress(input.tellg() - beginning);
-        block_index++;
+        // block_index++;
     }
     show_progress(total);
     if(output.is_open())
         output.close();
+    delete[] buffer;
 }
 
 void help(const char * argv[]) {
